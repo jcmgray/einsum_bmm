@@ -1,15 +1,15 @@
 import math
 import functools
 import autoray as ar
-import opt_einsum as oe
 
 
 @functools.lru_cache(2**12)
-def _get_completed_equation(eq):
+def _sanitize_equation(eq):
     """Get the input and output indices of an equation, computing the output
     implicitly as the sorted sequence of every index that appears exactly once
     if it is not  provided.
     """
+    # remove spaces
     eq = eq.replace(" ", "")
 
     if "->" not in eq:
@@ -29,7 +29,10 @@ def _get_completed_equation(eq):
 
 @functools.lru_cache(2**12)
 def _parse_einsum_single(eq, shape):
-    lhs, out = _get_completed_equation(eq)
+    """Cached parsing of a single term einsum equation into the necessary
+    sequence of arguments for axes diagonals, sums, and transposes.
+    """
+    lhs, out = _sanitize_equation(eq)
 
     # parse each index
     need_to_diag = []
@@ -54,9 +57,7 @@ def _parse_einsum_single(eq, shape):
             dinds = tuple(range(sizes[ixd]))
 
             # construct advanced indexing object
-            selector = tuple(
-                dinds if ix == ixd else slice(None) for ix in lhs
-            )
+            selector = tuple(dinds if ix == ixd else slice(None) for ix in lhs)
             diag_sels.append(selector)
 
             # after taking the diagonal what are new indices?
@@ -89,8 +90,20 @@ def _parse_einsum_single(eq, shape):
 
 @functools.lru_cache(2**12)
 def parse_double_eq(eq, shape_a, shape_b):
-    lhs, out = _get_completed_equation(eq)
-    lterm, rterm = lhs.split(',')
+    """Cached parsing of a two term einsum equation into the necessary
+    sequence of arguments for contracttion via batched matrix multiplication.
+    The steps we need to specify are:
+
+        1. Remove repeated and trivial indices from the left and right terms,
+           and transpose them, done as a single einsum.
+        2. Fuse the remaining indices so we have two 3D tensors.
+        3. Perform the batched matrix multiplication.
+        4. Unfuse the output to get the desired final index order.
+
+
+    """
+    lhs, out = _sanitize_equation(eq)
+    lterm, rterm = lhs.split(",")
 
     bat_inds = []  # appears L, R, O
     con_inds = []  # appears L, R, .
@@ -168,6 +181,7 @@ def parse_double_eq(eq, shape_a, shape_b):
         rgroups = (bat_inds, con_inds, right_keep)
         ogroups = (bat_inds, left_keep, right_keep)
     else:
+        # avoid size 1 batch dimension if no batch indices
         lgroups = (left_keep, con_inds)
         rgroups = (con_inds, right_keep)
         ogroups = (left_keep, right_keep)
@@ -196,42 +210,47 @@ def parse_double_eq(eq, shape_a, shape_b):
     return (
         eq_a,
         eq_b,
-        perm_ab,
         new_shape_a,
         new_shape_b,
         new_shape_ab,
+        perm_ab,
     )
 
 
 def _einsum_single(eq, x, backend=None):
-    try:
-        # try and use backend einsum for diagonal and sum reductions
-        return ar.do('einsum', eq, x, like=backend)
-    except ImportError:
-        pass
-
+    """Einsum on a single tensor, via three steps: diagonal selection
+    (via advanced indexing), axes summations, transposition. The logic for each
+    is cached based on the equation and array shape, and each step is only
+    performed if necessary.
+    """
     diag_sels, sum_axes, perm = _parse_einsum_single(eq, x.shape)
 
     if diag_sels is not None:
+        # diagonal reduction via advanced indexing
+        # e.g ababbac->abc
         for selector in diag_sels:
             x = x[selector]
 
     if sum_axes is not None:
-        x = ar.do('sum', x, sum_axes, like=backend)
+        # trivial removal of axes via summation
+        # e.g. abc->c
+        x = ar.do("sum", x, sum_axes, like=backend)
 
     if perm is not None:
-        x = ar.do('transpose', x, perm, like=backend)
+        # transpose to desired output
+        # e.g. abc->cba
+        x = ar.do("transpose", x, perm, like=backend)
 
     return x
 
 
 def einsum(eq, a, b=None, backend=None):
     """Perform arbitrary single and pairwise einsums using only `matmul`,
-    `transpose`, `reshape` and `sum`.
-
+    `transpose`, `reshape` and `sum`.  The logic for each is cached based on
+    the equation and array shape, and each step is only performed if necessary.
     """
     if b is None:
-        return _einsum_single(eq, a)
+        return _einsum_single(eq, a, backend=backend)
 
     # ensure we can cache on shapes
     a_shape = tuple(map(int, a.shape))
@@ -239,10 +258,10 @@ def einsum(eq, a, b=None, backend=None):
     (
         eq_a,
         eq_b,
-        perm_ab,
         new_shape_a,
         new_shape_b,
         new_shape_ab,
+        perm_ab,
     ) = parse_double_eq(eq, a_shape, b_shape)
 
     # prepare left
@@ -250,25 +269,29 @@ def einsum(eq, a, b=None, backend=None):
         # diagonals, sums, and tranpose
         a = _einsum_single(eq_a, a)
     if new_shape_a is not None:
-        a = ar.do('reshape', a, new_shape_a, like=backend)
+        a = ar.do("reshape", a, new_shape_a, like=backend)
 
     # prepare right
     if eq_b is not None:
         # diagonals, sums, and tranpose
         b = _einsum_single(eq_b, b)
     if new_shape_b is not None:
-        b = ar.do('reshape', b, new_shape_b, like=backend)
+        b = ar.do("reshape", b, new_shape_b, like=backend)
 
     # do the contraction!
-    ab = ar.do('matmul', a, b, like=backend)
+    ab = ar.do("matmul", a, b, like=backend)
 
     # prepare the output
     if new_shape_ab is not None:
-        ab = ar.do('reshape', ab, new_shape_ab, like=backend)
+        ab = ar.do("reshape", ab, new_shape_ab, like=backend)
     if perm_ab is not None:
-        ab = ar.do('transpose', ab, perm_ab, like=backend)
+        ab = ar.do("transpose", ab, perm_ab, like=backend)
 
     return ab
 
 
-oe.backends.dispatch._cached_funcs['einsum', 'numpy'] = einsum
+# # enable in opt_einsum:
+# import opt_einsum as oe
+# oe.backends.dispatch._cached_funcs['einsum', 'numpy'] = einsum
+# oe.backends.dispatch._cached_funcs['einsum', 'cupy'] = einsum
+# oe.backends.dispatch._cached_funcs['einsum', 'torch'] = einsum
