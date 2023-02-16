@@ -1,6 +1,7 @@
 import math
 import functools
 import autoray as ar
+import opt_einsum as oe
 
 
 @functools.lru_cache(2**12)
@@ -268,3 +269,6 @@ def einsum(eq, a, b=None, backend=None):
         ab = ar.do('transpose', ab, perm_ab, like=backend)
 
     return ab
+
+
+oe.backends.dispatch._cached_funcs['einsum', 'numpy'] = einsum
