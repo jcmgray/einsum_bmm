@@ -9,7 +9,7 @@ def _get_completed_equation(eq):
     implicitly as the sorted sequence of every index that appears exactly once
     if it is not  provided.
     """
-    eq = eq.split(" ", "")
+    eq = eq.replace(" ", "")
 
     if "->" not in eq:
         lhs = eq
