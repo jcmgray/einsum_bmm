@@ -1,5 +1,7 @@
 import math
 import functools
+import itertools
+
 import autoray as ar
 
 
@@ -250,23 +252,17 @@ def _einsum_single(eq, x, backend=None):
     return x
 
 
-def einsum(eq, a, b=None, backend=None):
-    """Perform arbitrary single and pairwise einsums using only `matmul`,
-    `transpose`, `reshape` and `sum`.  The logic for each is cached based on
-    the equation and array shape, and each step is only performed if necessary.
-    """
-    if b is None:
-        return _einsum_single(eq, a, backend=backend)
-
-    (
-        eq_a,
-        eq_b,
-        new_shape_a,
-        new_shape_b,
-        new_shape_ab,
-        perm_ab,
-    ) = parse_double_eq(eq, ar.shape(a), ar.shape(b))
-
+def _do_contraction_via_bmm(
+    a,
+    b,
+    eq_a,
+    eq_b,
+    new_shape_a,
+    new_shape_b,
+    new_shape_ab,
+    perm_ab,
+    backend,
+):
     # prepare left
     if eq_a is not None:
         # diagonals, sums, and tranpose
@@ -292,6 +288,159 @@ def einsum(eq, a, b=None, backend=None):
         ab = ar.do("transpose", ab, perm_ab, like=backend)
 
     return ab
+
+
+def einsum(eq, a, b=None, *, backend=None):
+    """Perform arbitrary single and pairwise einsums using only `matmul`,
+    `transpose`, `reshape` and `sum`.  The logic for each is cached based on
+    the equation and array shape, and each step is only performed if necessary.
+
+    Parameters
+    ----------
+    eq : str
+        The einsum equation.
+    a : array_like
+        The first array to contract.
+    b : array_like, optional
+        The second array to contract.
+    backend : str, optional
+        The backend to use for array operations. If ``None``, dispatch
+        automatically based on ``a`` and ``b``.
+
+    Returns
+    -------
+    array_like
+    """
+    if b is None:
+        return _einsum_single(eq, a, backend=backend)
+
+    (
+        eq_a,
+        eq_b,
+        new_shape_a,
+        new_shape_b,
+        new_shape_ab,
+        perm_ab,
+    ) = parse_double_eq(eq, ar.shape(a), ar.shape(b))
+
+    return _do_contraction_via_bmm(
+        a,
+        b,
+        eq_a,
+        eq_b,
+        new_shape_a,
+        new_shape_b,
+        new_shape_ab,
+        perm_ab,
+        backend,
+    )
+
+
+def gen_nice_inds():
+    """Generate the indices from [a-z, A-Z, reasonable unicode...]."""
+    for i in range(26):
+        yield chr(ord("a") + i)
+    for i in range(26):
+        yield chr(ord("A") + i)
+    for i in itertools.count(192):
+        yield chr(i)
+
+
+@functools.lru_cache(2**12)
+def parse_tensordot_axes(axes, shape_a, shape_b):
+    """Parse a tensordot specification into the necessary sequence of arguments
+    for contracttion via matrix multiplication. This just converts ``axes``
+    into an ``einsum`` eq string then calls ``parse_double_eq``.
+    """
+    ndim_a = len(shape_a)
+    ndim_b = len(shape_b)
+
+    if isinstance(axes, int):
+        axes_a = tuple(range(ndim_a - axes, ndim_a))
+        axes_b = tuple(range(axes))
+    else:
+        axes_a, axes_b = axes
+
+    num_con = len(axes_a)
+    if num_con != len(axes_b):
+        raise ValueError(
+            f"Axes should have the same length, got {axes_a} and {axes_b}."
+        )
+
+    possible_inds = gen_nice_inds()
+    inds_a = [next(possible_inds) for _ in range(ndim_a)]
+    inds_b = []
+    inds_out = inds_a.copy()
+
+    for axb in range(ndim_b):
+        if axb not in axes_b:
+            # right uncontracted index
+            ind = next(possible_inds)
+            inds_out.append(ind)
+        else:
+            # contracted index
+            axa = axes_a[axes_b.index(axb)]
+            # check that the shapes match
+            if shape_a[axa] != shape_b[axb]:
+                raise ValueError(
+                    f"Dimension mismatch between axes {axa} of {shape_a} and "
+                    f"{axb} of {shape_b}: {shape_a[axa]} != {shape_b[axb]}."
+                )
+            ind = inds_a[axa]
+            inds_out.remove(ind)
+        inds_b.append(ind)
+
+    eq = f"{''.join(inds_a)},{''.join(inds_b)}->{''.join(inds_out)}"
+
+    return parse_double_eq(eq, shape_a, shape_b)
+
+
+def tensordot(a, b, axes=2, *, backend=None):
+    """Perform a tensordot using only `matmul`, `transpose`, `reshape`. The
+    logic for each is cached based on the equation and array shape, and each
+    step is only performed if necessary.
+
+    Parameters
+    ----------
+    a, b : array_like
+        The arrays to contract.
+    axes : int or tuple of (sequence[int], sequence[int])
+        The number of axes to contract, or the axes to contract. If an int,
+        the last ``axes`` axes of ``a`` and the first ``axes`` axes of ``b``
+        are contracted. If a tuple, the axes to contract for ``a`` and ``b``
+        respectively.
+    backend : str or None, optional
+        The backend to use for array operations. If ``None``, dispatch
+        automatically based on ``a`` and ``b``.
+
+    Returns
+    -------
+    array_like
+    """
+    if not isinstance(axes, int):
+        # ensure hashable
+        axes = tuple(map(int, axes[0])), tuple(map(int, axes[1]))
+
+    (
+        eq_a,
+        eq_b,
+        new_shape_a,
+        new_shape_b,
+        new_shape_ab,
+        perm_ab,
+    ) = parse_tensordot_axes(axes, ar.shape(a), ar.shape(b))
+
+    return _do_contraction_via_bmm(
+        a,
+        b,
+        eq_a,
+        eq_b,
+        new_shape_a,
+        new_shape_b,
+        new_shape_ab,
+        perm_ab,
+        backend,
+    )
 
 
 # # enable in opt_einsum:
