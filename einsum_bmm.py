@@ -12,6 +12,9 @@ def _sanitize_equation(eq):
     # remove spaces
     eq = eq.replace(" ", "")
 
+    if "..." in eq:
+        raise NotImplementedError("Ellipsis not supported.")
+
     if "->" not in eq:
         lhs = eq
         tmp_subscripts = lhs.replace(",", "")
@@ -100,22 +103,24 @@ def parse_double_eq(eq, shape_a, shape_b):
         3. Perform the batched matrix multiplication.
         4. Unfuse the output to get the desired final index order.
 
-
     """
     lhs, out = _sanitize_equation(eq)
-    lterm, rterm = lhs.split(",")
+    a_term, b_term = lhs.split(",")
 
-    bat_inds = []  # appears L, R, O
-    con_inds = []  # appears L, R, .
-    left_keep = []  # appears L, ., O
-    left_only = []  # appears L, ., .
-    right_keep = []  # appears ., R, O
-    right_only = []  # appears ., R, .
+    if len(a_term) != len(shape_a):
+        raise ValueError(f"Term '{a_term}' does not match shape {shape_a}.")
+    if len(b_term) != len(shape_b):
+        raise ValueError(f"Term '{b_term}' does not match shape {shape_b}.")
+
+    bat_inds = []  # appears on A, B, O
+    con_inds = []  # appears on A, B, .
+    a_keep = []  # appears on A, ., O
+    b_keep = []  # appears on ., B, O
     sizes = {}
 
     # parse left term
     seen = set()
-    for ix, d in zip(lterm, shape_a):
+    for ix, d in zip(a_term, shape_a):
         # set or check size
         if sizes.setdefault(ix, d) != d:
             raise ValueError(
@@ -126,19 +131,17 @@ def parse_double_eq(eq, shape_a, shape_b):
             continue
         seen.add(ix)
 
-        if ix in rterm:
+        if ix in b_term:
             if ix in out:
                 bat_inds.append(ix)
             else:
                 con_inds.append(ix)
         elif ix in out:
-            left_keep.append(ix)
-        else:
-            left_only.append(ix)
+            a_keep.append(ix)
 
     # parse right term
     seen.clear()
-    for ix, d in zip(rterm, shape_b):
+    for ix, d in zip(b_term, shape_b):
         # set or check size
         if sizes.setdefault(ix, d) != d:
             raise ValueError(
@@ -149,42 +152,40 @@ def parse_double_eq(eq, shape_a, shape_b):
             continue
         seen.add(ix)
 
-        if ix not in lterm:
+        if ix not in a_term:
             if ix in out:
-                right_keep.append(ix)
-            else:
-                right_only.append(ix)
+                b_keep.append(ix)
 
     # take diagonal, remove any trivial axes and transpose left
-    desired_a = "".join((*bat_inds, *left_keep, *con_inds))
-    if lterm != desired_a:
-        eq_a = f"{lterm}->{desired_a}"
+    desired_a = "".join((*bat_inds, *a_keep, *con_inds))
+    if a_term != desired_a:
+        eq_a = f"{a_term}->{desired_a}"
     else:
         eq_a = None
 
     # take diagonal, remove any trivial axes and transpose right
-    desired_b = "".join((*bat_inds, *con_inds, *right_keep))
-    if rterm != desired_b:
-        eq_b = f"{rterm}->{desired_b}"
+    desired_b = "".join((*bat_inds, *con_inds, *b_keep))
+    if b_term != desired_b:
+        eq_b = f"{b_term}->{desired_b}"
     else:
         eq_b = None
 
     # then we want to permute the matmul produced output:
-    out_produced = "".join((*bat_inds, *left_keep, *right_keep))
+    out_produced = "".join((*bat_inds, *a_keep, *b_keep))
     perm_ab = tuple(out_produced.index(ix) for ix in out)
     if perm_ab == tuple(range(len(perm_ab))):
         perm_ab = None
 
     # then we want to reshape
     if bat_inds:
-        lgroups = (bat_inds, left_keep, con_inds)
-        rgroups = (bat_inds, con_inds, right_keep)
-        ogroups = (bat_inds, left_keep, right_keep)
+        lgroups = (bat_inds, a_keep, con_inds)
+        rgroups = (bat_inds, con_inds, b_keep)
+        ogroups = (bat_inds, a_keep, b_keep)
     else:
         # avoid size 1 batch dimension if no batch indices
-        lgroups = (left_keep, con_inds)
-        rgroups = (con_inds, right_keep)
-        ogroups = (left_keep, right_keep)
+        lgroups = (a_keep, con_inds)
+        rgroups = (con_inds, b_keep)
+        ogroups = (a_keep, b_keep)
 
     if any(len(group) != 1 for group in lgroups):
         new_shape_a = tuple(
@@ -223,7 +224,12 @@ def _einsum_single(eq, x, backend=None):
     is cached based on the equation and array shape, and each step is only
     performed if necessary.
     """
-    diag_sels, sum_axes, perm = _parse_einsum_single(eq, x.shape)
+    try:
+        return ar.do("einsum", eq, x, like=backend)
+    except ImportError:
+        pass
+
+    diag_sels, sum_axes, perm = _parse_einsum_single(eq, ar.shape(x))
 
     if diag_sels is not None:
         # diagonal reduction via advanced indexing
@@ -252,9 +258,6 @@ def einsum(eq, a, b=None, backend=None):
     if b is None:
         return _einsum_single(eq, a, backend=backend)
 
-    # ensure we can cache on shapes
-    a_shape = tuple(map(int, a.shape))
-    b_shape = tuple(map(int, b.shape))
     (
         eq_a,
         eq_b,
@@ -262,7 +265,7 @@ def einsum(eq, a, b=None, backend=None):
         new_shape_b,
         new_shape_ab,
         perm_ab,
-    ) = parse_double_eq(eq, a_shape, b_shape)
+    ) = parse_double_eq(eq, ar.shape(a), ar.shape(b))
 
     # prepare left
     if eq_a is not None:
@@ -279,6 +282,7 @@ def einsum(eq, a, b=None, backend=None):
         b = ar.do("reshape", b, new_shape_b, like=backend)
 
     # do the contraction!
+    # TODO: use multiply when no con_inds
     ab = ar.do("matmul", a, b, like=backend)
 
     # prepare the output
@@ -292,6 +296,7 @@ def einsum(eq, a, b=None, backend=None):
 
 # # enable in opt_einsum:
 # import opt_einsum as oe
-# oe.backends.dispatch._cached_funcs['einsum', 'numpy'] = einsum
-# oe.backends.dispatch._cached_funcs['einsum', 'cupy'] = einsum
-# oe.backends.dispatch._cached_funcs['einsum', 'torch'] = einsum
+
+# oe.backends.dispatch._cached_funcs["einsum", "numpy"] = einsum
+# oe.backends.dispatch._cached_funcs["einsum", "cupy"] = einsum
+# oe.backends.dispatch._cached_funcs["einsum", "torch"] = einsum

@@ -39,7 +39,7 @@ def random_single_eq(
 @pytest.mark.parametrize('seed', range(1000))
 def test_random_single_eq(seed):
     import numpy as np
-    from fast_einsum import einsum
+    from einsum_bmm import einsum
     eq, shape = random_single_eq(seed=seed)
     x = np.random.randn(*shape)
 
@@ -92,7 +92,7 @@ def random_pair_eq(
 @pytest.mark.parametrize('seed', range(1000))
 def test_random_pair_eq(seed):
     import numpy as np
-    from fast_einsum import einsum
+    from einsum_bmm import einsum
     eq, shape_a, shape_b = random_pair_eq(seed=seed)
     a = np.random.randn(*shape_a)
     b = np.random.randn(*shape_b)
