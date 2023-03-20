@@ -100,3 +100,50 @@ def test_random_pair_eq(seed):
     y1 = einsum(eq, a, b)
     y2 = np.einsum(eq, a, b)
     assert np.allclose(y1, y2)
+
+
+def random_tensordot(
+    min_dim=1,
+    max_dim=6,
+    d_low=2,
+    d_high=4,
+    seed=None,
+):
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+
+    a_ndim = rng.integers(min_dim, max_dim + 1)
+    b_ndim = rng.integers(min_dim, max_dim + 1)
+    num_contracted = rng.integers(0, min(a_ndim, b_ndim) + 1)
+    a_shape = rng.integers(d_low, d_high + 1, size=a_ndim)
+    b_shape = rng.integers(d_low, d_high + 1, size=b_ndim)
+
+
+    if rng.random() < 0.1:
+        # single int specification
+        axes = num_contracted
+        if axes > 0:
+            b_shape[:axes] = a_shape[-axes:]
+    else:
+        a_axes = rng.choice(a_ndim, size=num_contracted, replace=False)
+        b_axes = rng.choice(b_ndim, size=num_contracted, replace=False)
+        axes = (a_axes, b_axes)
+        a_shape[a_axes] = b_shape[b_axes]
+
+    return a_shape, b_shape, axes
+
+
+@pytest.mark.parametrize('seed', range(100))
+def test_random_tensordot(seed):
+    import numpy as np
+    from einsum_bmm import tensordot
+
+    a_shape, b_shape, axes = random_tensordot(seed=seed)
+
+    a = np.random.randn(*a_shape)
+    b = np.random.randn(*b_shape)
+
+    y1 = tensordot(a, b, axes=axes)
+    y2 = np.tensordot(a, b, axes=axes)
+    assert np.allclose(y1, y2)

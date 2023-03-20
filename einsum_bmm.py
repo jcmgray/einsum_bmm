@@ -417,9 +417,11 @@ def tensordot(a, b, axes=2, *, backend=None):
     -------
     array_like
     """
-    if not isinstance(axes, int):
+    try:
         # ensure hashable
         axes = tuple(map(int, axes[0])), tuple(map(int, axes[1]))
+    except IndexError:
+        axes = int(axes)
 
     (
         eq_a,
