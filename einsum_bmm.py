@@ -93,6 +93,43 @@ def _parse_einsum_single(eq, shape):
     return diag_sels, sum_axes, perm
 
 
+def _parse_pure_multiplication(a_term, b_term, out, sizes):
+    desired_a = ""
+    desired_b = ""
+    new_shape_a = []
+    new_shape_b = []
+    for ix in out:
+        if ix in a_term:
+            desired_a += ix
+            new_shape_a.append(sizes[ix])
+        else:
+            new_shape_a.append(1)
+        if ix in b_term:
+            desired_b += ix
+            new_shape_b.append(sizes[ix])
+        else:
+            new_shape_b.append(1)
+
+    if desired_a != a_term:
+        eq_a = f"{a_term}->{desired_a}"
+    else:
+        eq_a = None
+    if desired_b != b_term:
+        eq_b = f"{b_term}->{desired_b}"
+    else:
+        eq_b = None
+
+    return (
+        eq_a,
+        eq_b,
+        new_shape_a,
+        new_shape_b,
+        None,  # new_shape_ab, not needed since not fusing
+        None,  # perm_ab, not needed as we transpose a and b first
+        True,  # pure_multiplication=True
+    )
+
+
 @functools.lru_cache(2**12)
 def parse_double_eq(eq, shape_a, shape_b):
     """Cached parsing of a two term einsum equation into the necessary
@@ -158,6 +195,10 @@ def parse_double_eq(eq, shape_a, shape_b):
             if ix in out:
                 b_keep.append(ix)
 
+    if not con_inds:
+        # contraction is pure multiplication
+        return _parse_pure_multiplication(a_term, b_term, out, sizes)
+
     # take diagonal, remove any trivial axes and transpose left
     desired_a = "".join((*bat_inds, *a_keep, *con_inds))
     if a_term != desired_a:
@@ -217,6 +258,7 @@ def parse_double_eq(eq, shape_a, shape_b):
         new_shape_b,
         new_shape_ab,
         perm_ab,
+        False,  # pure_multiplication=False
     )
 
 
@@ -261,6 +303,7 @@ def _do_contraction_via_bmm(
     new_shape_b,
     new_shape_ab,
     perm_ab,
+    pure_multiplication,
     backend,
 ):
     # prepare left
@@ -277,8 +320,11 @@ def _do_contraction_via_bmm(
     if new_shape_b is not None:
         b = ar.do("reshape", b, new_shape_b, like=backend)
 
+    if pure_multiplication:
+        # no contracted indices
+        return ar.do("multiply", a * b)
+
     # do the contraction!
-    # TODO: use multiply when no con_inds
     ab = ar.do("matmul", a, b, like=backend)
 
     # prepare the output
@@ -321,6 +367,7 @@ def einsum(eq, a, b=None, *, backend=None):
         new_shape_b,
         new_shape_ab,
         perm_ab,
+        pure_multiplication,
     ) = parse_double_eq(eq, ar.shape(a), ar.shape(b))
 
     return _do_contraction_via_bmm(
@@ -332,6 +379,7 @@ def einsum(eq, a, b=None, *, backend=None):
         new_shape_b,
         new_shape_ab,
         perm_ab,
+        pure_multiplication,
         backend,
     )
 
@@ -430,6 +478,7 @@ def tensordot(a, b, axes=2, *, backend=None):
         new_shape_b,
         new_shape_ab,
         perm_ab,
+        pure_multiplication,
     ) = parse_tensordot_axes(axes, ar.shape(a), ar.shape(b))
 
     return _do_contraction_via_bmm(
@@ -441,6 +490,7 @@ def tensordot(a, b, axes=2, *, backend=None):
         new_shape_b,
         new_shape_ab,
         perm_ab,
+        pure_multiplication,
         backend,
     )
 

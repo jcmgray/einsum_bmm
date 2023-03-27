@@ -147,3 +147,47 @@ def test_random_tensordot(seed):
     y1 = tensordot(a, b, axes=axes)
     y2 = np.tensordot(a, b, axes=axes)
     assert np.allclose(y1, y2)
+
+
+def eq_to_shapes(eq, d_min, d_max, seed=None):
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    sizes = {}
+    lhs = eq.split('->')[0]
+    terms = lhs.split(',')
+    shapes = []
+    for term in terms:
+        shape = ()
+        for ix in term:
+            if ix not in sizes:
+                sizes[ix] = rng.integers(d_min, d_max + 1)
+            d = sizes[ix]
+            shape += (d,)
+        shapes.append(shape)
+    return shapes
+
+
+@pytest.mark.parametrize('eq', [
+    'ab->ab',
+    'ab->ba',
+    'ab,bc->ac',
+    'a,ab->b',
+    'ab,b->a',
+    'a,a->',
+    'ab,ab->',
+    'ab,ab->',
+    'abc,abc->abc',
+    ',->',
+])
+@pytest.mark.parametrize('seed', range(10))
+def test_specific_cases(eq, seed):
+    import numpy as np
+    from einsum_bmm import einsum
+
+    rng = np.random.default_rng(seed)
+    shapes = eq_to_shapes(eq, 2, 5, seed=seed)
+    arrays = [rng.random(shape) for shape in shapes]
+
+    y1 = einsum(eq, *arrays)
+    y2 = np.einsum(eq, *arrays)
+    assert np.allclose(y1, y2)
