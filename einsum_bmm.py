@@ -322,7 +322,7 @@ def _do_contraction_via_bmm(
 
     if pure_multiplication:
         # no contracted indices
-        return ar.do("multiply", a * b)
+        return ar.do("multiply", a, b)
 
     # do the contraction!
     ab = ar.do("matmul", a, b, like=backend)
