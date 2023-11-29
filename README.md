@@ -1,7 +1,11 @@
 # `einsum_bmm`
 
+**:cactus: This has now been incorporated into `cotengra`, see the [high level functionality](https://cotengra.readthedocs.io/en/latest/high-level-interface.html), called with `implementation='cotengra'`, and the actual two term implementation [here](https://cotengra.readthedocs.io/en/latest/autoapi/cotengra/contract/index.html#cotengra.contract.einsum). There is also a PR for `numpy.einsum` with the `optimize` kwarg [here](https://github.com/numpy/numpy/pull/23513) :cactus:**
+
 This repository provides an `einsum` (and `tensordot`) function implemented via **batch matrix
 multiply**.
+
+
 
 1. This *can* be much faster than the raw `numpy.einsum` function, especially
    for large and high dimensional contractions.
